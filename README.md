@@ -11,7 +11,7 @@ A Go library for hiding arbitrary binary data in images using dynamic bit-shifti
 - **Seed-derived separators** — no fixed byte patterns in the bit stream. Enables fast wrong-seed rejection
 - **XXH3 integrity checksum** — payload verified on decode, wrong seeds rejected immediately
 - **Phase machine decoder** — zero-allocation header parsing with early exit on wrong seed
-- **Works with any image format** — operates on `*image.NRGBA`; caller handles PNG/JPEG/QOI encoding
+- **Works with any image format** — operates on `*image.NRGBA`; caller handles PNG/QOI/BMP encoding
 - **Single dependency** — only [XXH3](https://github.com/zeebo/xxh3)
 
 ## Steganalysis Resistance
@@ -148,7 +148,7 @@ func GenerateSeed() uint64
 
 The library operates on `*image.NRGBA` (non-premultiplied RGBA). Use `ToNRGBA()` to convert from any `image.Image`. Only RGB channels are used for data embedding; the alpha channel is preserved at 255.
 
-**Important:** Use lossless image formats (PNG, BMP, QOI) for saving steganographic images. Lossy formats (JPEG) will destroy the embedded data.
+**Important:** Use only lossless image formats (PNG, BMP, QOI) for saving steganographic images. Lossy formats destroy the embedded data.
 
 ## See Also
 
