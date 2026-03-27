@@ -1,16 +1,18 @@
 // Package steganography implements dynamic bit-shifting steganography.
 //
 // Encoding 3 bits per pixel using RGB channels. Per-pixel bit position
-// (bit 0 or bit 1) is dynamically selected using XXH3 hash of
-// (seed, x, y) coordinates, making the encoding pattern undetectable
+// (bit 0 or bit 1) is dynamically selected using a pluggable hash function
+// of (seed, x, y) coordinates, making the encoding pattern undetectable
 // by standard steganalysis tools.
 //
 // Features:
-//   - Dynamic bit position selection per pixel via XXH3(seed, x, y)
+//   - Pluggable hash function — user supplies any func([]byte, uint64) uint64
+//   - Dynamic bit position selection per pixel via hash(seed, x, y)
 //   - Seed-dependent start pixel offset (data doesn't start at pixel 0,0)
 //   - Seed-derived separators (no fixed byte patterns in the stream)
-//   - XXH3 checksum for integrity verification
+//   - Hash-based checksum for integrity verification
 //   - Fast wrong-seed rejection via separator mismatch
+//   - Zero external dependencies — hash function supplied by caller
 //
 // The library operates on *image.NRGBA images. The caller is responsible
 // for loading/saving images in any format (PNG, QOI, etc.).
@@ -24,32 +26,36 @@ import (
 	"image/color"
 	"image/draw"
 	"math/big"
-
-	"github.com/zeebo/xxh3"
 )
 
+// HashFunc is the pluggable hash function interface.
+// The function accepts arbitrary-length data and a uint64 seed,
+// returning a uint64 hash. Any non-cryptographic or cryptographic
+// hash with good avalanche properties is suitable (XXH3, SipHash, etc.).
+type HashFunc func(data []byte, seed uint64) uint64
+
 // useSecondBit decides which bit position (0 or 1) to use for this pixel,
-// based on XXH3 hash of seed + coordinates. Defeats steganalysis by making
+// based on hash of seed + coordinates. Defeats steganalysis by making
 // the encoding pattern unpredictable without knowledge of the seed.
 //
 // x and y are encoded as separate fields in a fixed-size buffer to avoid
 // diagonal collision where (x=3,y=5) and (x=5,y=3) would produce the same
 // hash if only x+y were hashed. Zero-allocation: uses stack-allocated buffer.
-func useSecondBit(seed uint64, x, y int) bool {
+func useSecondBit(hash HashFunc, seed uint64, x, y int) bool {
 	var buf [4]byte
 	buf[0] = byte(x)
 	buf[1] = byte(x >> 8)
 	buf[2] = byte(y)
 	buf[3] = byte(y >> 8)
-	return xxh3.HashSeed(buf[:], seed)&1 == 1
+	return hash(buf[:], seed)&1 == 1
 }
 
 // makeSeparator derives a 2-byte separator from the seed.
 // Each seed produces a unique separator, which serves two purposes:
 // 1. Eliminates fixed byte patterns from the bit stream
 // 2. Enables fast rejection of wrong seeds during brute-force decode
-func makeSeparator(seed uint64) [2]byte {
-	h := xxh3.HashSeed([]byte{0x01}, seed)
+func makeSeparator(hash HashFunc, seed uint64) [2]byte {
+	h := hash([]byte{0x01}, seed)
 	s0 := byte(h)
 	s1 := byte(h >> 8)
 	if s0 == 0 {
@@ -64,8 +70,8 @@ func makeSeparator(seed uint64) [2]byte {
 // deriveStartPixel computes a seed-dependent pixel offset for data placement.
 // Instead of always starting from pixel (0,0), encoding/decoding begins at
 // a pseudo-random position and wraps around the image.
-func deriveStartPixel(seed uint64, totalPixels int) int {
-	h := xxh3.HashSeed([]byte{0x02}, seed)
+func deriveStartPixel(hash HashFunc, seed uint64, totalPixels int) int {
+	h := hash([]byte{0x02}, seed)
 	return int(h % uint64(totalPixels))
 }
 
@@ -93,7 +99,7 @@ func generateRandomIntN(min, max int) int {
 //	──────────── ──────────────────────────
 //	 0 ..  3     payload size  (uint32 BE)
 //	 4 ..  5     separator     (seed-derived)
-//	 6 .. 13     XXH3 checksum (uint64 BE) — xxh3(payload, seed)
+//	 6 .. 13     checksum      (uint64 BE) — hash(payload, seed)
 //	14 .. 15     separator     (seed-derived)
 //	16 .. 16+N-1 payload data  (N = size)
 //	16+N ..      random padding + random EOF marker (16 bytes)
@@ -107,9 +113,11 @@ func generateRandomIntN(min, max int) int {
 // significant bits of RGB channels (3 bits per pixel). The alpha channel
 // is preserved unchanged.
 //
-// seed determines the bit position pattern, start pixel offset, and separators.
-// The same seed must be used for decoding.
-func Encode(img *image.NRGBA, payload []byte, seed uint64) (*image.NRGBA, error) {
+// hash is the pluggable hash function used for bit position selection,
+// separator derivation, start pixel offset, and integrity checksum.
+// seed determines the encoding pattern. The same hash and seed must be
+// used for decoding.
+func Encode(img *image.NRGBA, payload []byte, seed uint64, hash HashFunc) (*image.NRGBA, error) {
 	if len(payload) == 0 {
 		return nil, fmt.Errorf("steganography: empty payload")
 	}
@@ -118,10 +126,10 @@ func Encode(img *image.NRGBA, payload []byte, seed uint64) (*image.NRGBA, error)
 	eofMarker := generateRandomBytes(16)
 
 	// derive seed-dependent separator
-	hs := makeSeparator(seed)
+	hs := makeSeparator(hash, seed)
 
 	// calculate checksum from payload
-	xxcs := xxh3.HashSeed(payload, seed)
+	cs := hash(payload, seed)
 
 	// build stream: [size(4)][sep(2)][checksum(8)][sep(2)][payload][eof(16)]
 	streamLen := 4 + 2 + 8 + 2 + len(payload) + 16
@@ -135,7 +143,7 @@ func Encode(img *image.NRGBA, payload []byte, seed uint64) (*image.NRGBA, error)
 
 	// checksum + separator
 	csumBuf := make([]byte, 8)
-	binary.BigEndian.PutUint64(csumBuf, xxcs)
+	binary.BigEndian.PutUint64(csumBuf, cs)
 	stream = append(stream, csumBuf...)
 	stream = append(stream, hs[0], hs[1])
 
@@ -153,7 +161,7 @@ func Encode(img *image.NRGBA, payload []byte, seed uint64) (*image.NRGBA, error)
 	width := img.Bounds().Dx()
 	height := img.Bounds().Dy()
 	totalPixels := width * height
-	startPixel := deriveStartPixel(seed, totalPixels)
+	startPixel := deriveStartPixel(hash, seed, totalPixels)
 
 	bitIndex := 0
 
@@ -167,7 +175,7 @@ Main:
 		r, g, b := c.R, c.G, c.B
 
 		// decide which bit position to use for this pixel (bit 0 or bit 1)
-		use2LSB := useSecondBit(seed, x, y)
+		use2LSB := useSecondBit(hash, seed, x, y)
 
 		var mask uint8
 		if use2LSB {
@@ -215,9 +223,11 @@ Main:
 //
 // Returns the original payload or an error if the seed is wrong or data
 // is corrupt. Wrong seeds are rejected quickly via separator mismatch.
-func Decode(img *image.NRGBA, seed uint64) ([]byte, error) {
+//
+// hash must be the same hash function used during Encode.
+func Decode(img *image.NRGBA, seed uint64, hash HashFunc) ([]byte, error) {
 	// derive seed-dependent separator
-	hs := makeSeparator(seed)
+	hs := makeSeparator(hash, seed)
 
 	// pre-allocate data buffer to maximum possible size
 	maxBytes := (img.Bounds().Dx()*img.Bounds().Dy()*3 + 7) / 8
@@ -237,14 +247,14 @@ func Decode(img *image.NRGBA, seed uint64) ([]byte, error) {
 	width := img.Bounds().Dx()
 	height := img.Bounds().Dy()
 	totalPixels := width * height
-	startPixel := deriveStartPixel(seed, totalPixels)
+	startPixel := deriveStartPixel(hash, seed, totalPixels)
 
 	bitIndex := 0
 
 	// Phase machine:
 	//   phase 0: reading size + separator into ba (bytes 0-5)
 	//   phase 1: reading checksum + separator into bb (bytes 6-15)
-	//   phase 2: reading payload data, verifying XXH3 checksum
+	//   phase 2: reading payload data, verifying checksum
 	phase := 0
 	cnt := 0
 
@@ -257,7 +267,7 @@ Main:
 		c := img.NRGBAAt(x, y)
 		r, g, b := c.R, c.G, c.B
 
-		use2LSB := useSecondBit(seed, x, y)
+		use2LSB := useSecondBit(hash, seed, x, y)
 
 		for i := 0; i < 3; i++ {
 			byteIndex := bitIndex / 8
@@ -269,8 +279,8 @@ Main:
 			// payload completion check (phase 2 only)
 			if phase == 2 && byteIndex >= 16+int(size) {
 				cdata := data[16 : 16+size]
-				xxcs := xxh3.HashSeed(cdata, seed)
-				if xxcs == csum {
+				cs := hash(cdata, seed)
+				if cs == csum {
 					result := make([]byte, size)
 					copy(result, cdata)
 					return result, nil
@@ -346,8 +356,8 @@ func ToNRGBA(src image.Image) *image.NRGBA {
 // that can be embedded in the given image.
 func MaxPayloadBytes(img *image.NRGBA) int {
 	totalBits := maxBits(img)
-	headerBits := 16 * 8  // 16-byte header
-	eofBits := 16 * 8     // 16-byte EOF marker
+	headerBits := 16 * 8 // 16-byte header
+	eofBits := 16 * 8    // 16-byte EOF marker
 	availBits := totalBits - headerBits - eofBits
 	if availBits < 0 {
 		return 0

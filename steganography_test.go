@@ -7,7 +7,14 @@ import (
 	"image"
 	"image/color"
 	"testing"
+
+	"github.com/zeebo/xxh3"
 )
+
+// xxh3Hash wraps xxh3.HashSeed for use as HashFunc.
+func xxh3Hash(data []byte, seed uint64) uint64 {
+	return xxh3.HashSeed(data, seed)
+}
 
 // makeTestImage creates an NRGBA image with random pixel data.
 func makeTestImage(width, height int) *image.NRGBA {
@@ -36,12 +43,12 @@ func TestRoundtrip(t *testing.T) {
 			rand.Read(payload)
 
 			img := makeTestImage(128, 128)
-			encoded, err := Encode(copyImage(img), payload, seed)
+			encoded, err := Encode(copyImage(img), payload, seed, xxh3Hash)
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			decoded, err := Decode(encoded, seed)
+			decoded, err := Decode(encoded, seed, xxh3Hash)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -60,12 +67,12 @@ func TestWrongSeed(t *testing.T) {
 	payload := []byte("secret message")
 	img := makeTestImage(64, 64)
 
-	encoded, err := Encode(img, payload, seed1)
+	encoded, err := Encode(img, payload, seed1, xxh3Hash)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = Decode(encoded, seed2)
+	_, err = Decode(encoded, seed2, xxh3Hash)
 	if err == nil {
 		t.Fatal("expected error for wrong seed, got nil")
 	}
@@ -75,7 +82,7 @@ func TestEmptyPayload(t *testing.T) {
 	seed := GenerateSeed()
 	img := makeTestImage(64, 64)
 
-	_, err := Encode(img, []byte{}, seed)
+	_, err := Encode(img, []byte{}, seed, xxh3Hash)
 	if err == nil {
 		t.Fatal("expected error for empty payload")
 	}
@@ -88,7 +95,7 @@ func TestPayloadTooLarge(t *testing.T) {
 	payload := make([]byte, 1024) // too large for 8x8
 	rand.Read(payload)
 
-	_, err := Encode(img, payload, seed)
+	_, err := Encode(img, payload, seed, xxh3Hash)
 	if err == nil {
 		t.Fatal("expected error for oversized payload")
 	}
@@ -107,12 +114,12 @@ func TestMaxPayloadBytes(t *testing.T) {
 	rand.Read(payload)
 
 	seed := GenerateSeed()
-	encoded, err := Encode(copyImage(img), payload, seed)
+	encoded, err := Encode(copyImage(img), payload, seed, xxh3Hash)
 	if err != nil {
 		t.Fatalf("payload at max capacity should fit: %v", err)
 	}
 
-	decoded, err := Decode(encoded, seed)
+	decoded, err := Decode(encoded, seed, xxh3Hash)
 	if err != nil {
 		t.Fatalf("decode failed: %v", err)
 	}
@@ -147,12 +154,12 @@ func TestBinaryData(t *testing.T) {
 	seed := GenerateSeed()
 	img := makeTestImage(128, 128)
 
-	encoded, err := Encode(img, payload, seed)
+	encoded, err := Encode(img, payload, seed, xxh3Hash)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	decoded, err := Decode(encoded, seed)
+	decoded, err := Decode(encoded, seed, xxh3Hash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,11 +177,11 @@ func TestDifferentSeedsDifferentOutput(t *testing.T) {
 	img1 := makeTestImage(64, 64)
 	img2 := copyImage(img1)
 
-	enc1, err := Encode(img1, payload, seed1)
+	enc1, err := Encode(img1, payload, seed1, xxh3Hash)
 	if err != nil {
 		t.Fatal(err)
 	}
-	enc2, err := Encode(img2, payload, seed2)
+	enc2, err := Encode(img2, payload, seed2, xxh3Hash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +199,7 @@ func BenchmarkEncode(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Encode(copyImage(img), payload, seed)
+		Encode(copyImage(img), payload, seed, xxh3Hash)
 	}
 }
 
@@ -201,10 +208,10 @@ func BenchmarkDecode(b *testing.B) {
 	payload := make([]byte, 1024)
 	rand.Read(payload)
 	img := makeTestImage(128, 128)
-	encoded, _ := Encode(img, payload, seed)
+	encoded, _ := Encode(img, payload, seed, xxh3Hash)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Decode(encoded, seed)
+		Decode(encoded, seed, xxh3Hash)
 	}
 }
